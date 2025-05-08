@@ -1,12 +1,17 @@
 import { config } from "dotenv";
 import { OpenAI } from "openai";
+import { Groq } from "groq-sdk";
 import { Interview, User } from "./schema.js";
 import fs from "fs";
 import { logger } from "./index.js";
 
 config();
 const OPEN_AI_API_KEY = process.env.OPEN_AI_API_KEY;
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const openai = new OpenAI({ apiKey: OPEN_AI_API_KEY });
+const client = new Groq({
+  apiKey: GROQ_API_KEY,
+});
 
 export const generateQuestions = async (req, res) => {
   try {
@@ -68,7 +73,8 @@ export const generateQuestions = async (req, res) => {
             }
           ]
 
-          .JSON format is preferred.
+          .JSON format is preferred. Dont give any additional text or preamble.just json format.
+          AVOID ANY TRAILING COMMAS,notes and make sure to follow the JSON format strictly. 
           `,
         },
         {
@@ -83,6 +89,7 @@ export const generateQuestions = async (req, res) => {
     if (response.choices[0].message.content) {
       try {
         const questionsObject = JSON.parse(response.choices[0].message.content);
+        console.log(questionsObject);
         if (!questionsObject.questions) {
           logger.error(
             "Failed to parse response from OpenAI: No 'questions' property found"
@@ -129,6 +136,131 @@ export const generateQuestions = async (req, res) => {
     }
   } catch (error) {
     console.error("Error generating questions:", error.message);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+};
+
+export const generateQuestions2 = async (req, res) => {
+  try {
+    const { job_description, job_requirements, interview_level, email } =
+      req.body;
+
+    if (!job_description || !job_requirements || !interview_level || !email) {
+      return res.status(400).json({ error: "All fields are required" });
+    }
+
+    const response = await client.chat.completions.create({
+      messages: [
+        {
+          role: "user",
+          content: `
+          Generate 10 interview questions related to the job description which is ${job_description} 
+          and job requirements are ${job_requirements} of ${interview_level} difficulty to prepare a 
+          candidate for an interview in the field of Computer Science. Keep the questions at index 0-4 
+          focused on personal background and personality, and questions at index 5-9 focused on technical 
+          knowledge and problem-solving skills.
+
+          The response should strictly be in the following JSON format, with no additional text or explanation:
+
+          {
+            "questions": [
+              {
+                "question": "What motivated you to pursue a career in software development, and how do you stay up-to-date with the latest technologies and trends?"
+              },
+              {
+                "question": "Can you describe a project you worked on that pushed your coding skills to the next level? What did you learn from the experience?"
+              },
+              {
+                "question": "Explain the concept of polymorphism in object-oriented programming. Can you provide an example of how you've applied it in a real-world scenario?"
+              },
+              {
+                "question": "Tell me about a time when you had to troubleshoot a complex issue in your code. What was the problem, and how did you resolve it?"
+              },
+              {
+                "question": "How do you approach testing and debugging your code? Can you walk me through your process for identifying and fixing errors?"
+              },
+              {
+                "question": "What is your experience with version control systems such as Git? Can you describe a scenario where you used it to manage a project?"
+              },
+              {
+                "question": "Can you describe a software development project you worked on that had significant constraints, such as limited resources or a tight deadline? How did you adapt?"
+              },
+              {
+                "question": "In what ways do you prioritize your tasks and manage your time when working on multiple projects or tight deadlines?"
+              },
+              {
+                "question": "Can you describe an innovative solution you came up with to solve a complex problem? How did you implement it and what were the results?"
+              },
+              {
+                "question": "How do you handle conflicting priorities and tight deadlines? Can you provide an example of a time when you had to juggle multiple competing demands?"
+              }
+            ]
+          }
+
+          Make sure the response does *not* contain any additional text, explanation, or preamble. Only return the *exact* JSON as shown above.
+          `,
+        },
+      ],
+      model: "llama3-8b-8192",
+    });
+
+    const responseContent = response.choices[0]?.message?.content;
+    console.log(responseContent);
+
+    if (!responseContent) {
+      logger.error("Groq API response is empty or undefined");
+      return res
+        .status(500)
+        .json({ error: "Failed to retrieve response from Groq" });
+    }
+
+    let questionsObject;
+    try {
+      questionsObject = JSON.parse(responseContent);
+    } catch (error) {
+      logger.error("Failed to parse response from Groq: Invalid JSON format");
+      return res.status(500).json({
+        error:
+          "Failed to parse response from Groq. Ensure the response is in valid JSON format.",
+      });
+    }
+
+    if (!questionsObject.questions) {
+      logger.error(
+        "Failed to parse response from Groq: No 'questions' property found"
+      );
+      return res
+        .status(500)
+        .json({ error: "Failed to parse response from Groq" });
+    }
+
+    let qa = [];
+    questionsObject.questions.forEach((question, index) => {
+      qa.push({
+        Question: question.question,
+        Answer: "",
+        Type: index <= 4 ? "Background" : "Technical",
+        Score: 0,
+      });
+    });
+
+    const interview_id = Math.random().toString(36).substr(2, 9);
+
+    await Interview.create({
+      InterviewId: interview_id,
+      Email: email,
+      Job_Description: job_description,
+      Job_Requirments: job_requirements,
+      Date: new Date().toLocaleDateString(),
+      Time: new Date().toLocaleTimeString(),
+      QA: qa,
+      TotalScore: 0,
+    });
+
+    logger.info("Questions generated successfully using Groq");
+    res.status(200).json({ questions: qa, interview_id: interview_id });
+  } catch (error) {
+    console.error("Error generating questions using Groq:", error.message);
     res.status(500).json({ error: "Internal Server Error" });
   }
 };
@@ -263,8 +395,10 @@ export const suggestedAnswer = async (req, res) => {
 
     if (response.choices[0].message.content) {
       const suggestedAnswer = JSON.parse(response.choices[0].message.content);
-      res.status(200).json({ suggested_answer:suggestedAnswer.suggested_answer });
-    }else{
+      res
+        .status(200)
+        .json({ suggested_answer: suggestedAnswer.suggested_answer });
+    } else {
       console.error("OpenAI response data is undefined");
       res
         .status(500)
@@ -276,7 +410,137 @@ export const suggestedAnswer = async (req, res) => {
     res.status(500).json({ error: "Internal Server Error" });
   }
 };
+export const submitAnswer2 = async (req, res) => {
+  try {
+    const { interview_id, email, question_index, answer, difficulty_level } =
+      req.body;
+    const interview = await Interview.findOne({ InterviewId: interview_id });
+    if (!interview) {
+      return res.status(404).json({ error: "Interview not found" });
+    }
+    if (interview.Email !== email) {
+      return res.status(403).json({ error: "Unauthorized" });
+    }
 
+    let question = interview.QA[question_index];
+
+    const scorePrompt = `
+    Evaluate the candidate's answer "${answer}" to the following question: "${question.Question}".
+    On a scale of 1 to 10, rate the quality of the answer provided by considering factors such as:
+    - Clarity
+    - Depth of understanding
+    - Relevance to the question
+    - Problem-solving approach
+
+    Please provide only a cumulative score that reflects the overall effectiveness of the response in strict JSON format.
+    The response should strictly be a JSON object containing a "score" key, without any additional text, explanation, or preamble.
+
+    Example response:
+    {
+      "score": 8
+    }
+
+    The interview is at the ${difficulty_level} level, so rate accordingly, simulating a real interview setting.
+    Do not include any extra information or text in your response, just return the JSON object.
+    `;
+
+    const response = await client.chat.completions.create({
+      messages: [
+        {
+          role: "user",
+          content: scorePrompt,
+        },
+      ],
+      model: "llama3-8b-8192",
+    });
+
+    const responseContent = response.choices[0]?.message?.content;
+    console.log(responseContent);
+
+    if (!responseContent) {
+      logger.error("Groq API response is empty or undefined");
+      return res
+        .status(500)
+        .json({ error: "Failed to retrieve response from Groq" });
+    }
+
+    let scoreObject;
+    try {
+      scoreObject = JSON.parse(responseContent);
+    } catch (error) {
+      logger.error("Failed to parse response from Groq: Invalid JSON format");
+      return res.status(500).json({
+        error: "Failed to retrieve valid JSON response from Groq",
+      });
+    }
+
+    const score = scoreObject.score;
+    if (isNaN(score) || score < 1 || score > 10) {
+      return res.status(400).json({ error: "Invalid score" });
+    }
+
+    question.Answer = answer;
+    question.Score = score;
+
+    let sumOfScores = 0;
+    interview.QA.forEach((qa) => {
+      sumOfScores += qa.Score;
+    });
+
+    let totalScore = sumOfScores / 10;
+    interview.TotalScore = totalScore;
+
+    await interview.save();
+
+    const allInterviews = await Interview.find({ Email: email });
+
+    let totalScoreOfAllInterviews = 0;
+
+    allInterviews.forEach((interview) => {
+      totalScoreOfAllInterviews += interview.TotalScore;
+    });
+
+    const averageScore = totalScoreOfAllInterviews / allInterviews.length;
+    let badge = "";
+    const user = await User.findOne({ Email: email });
+
+    // Score 0-3: Newbie
+    // Score 4-6: Intermediate
+    // Score 7-9: Advanced
+    // Score 10: Expert
+
+    let badge_url = "";
+    if (averageScore >= 0 && averageScore <= 3) {
+      badge = "Newbie";
+    } else if (averageScore > 3 && averageScore <= 6) {
+      badge = "Intermediate";
+      badge_url =
+        "https://d8it4huxumps7.cloudfront.net/uploads/images/gamify_badges/login_streak/2.png?d=140x140";
+      user.Badges_Url.push(badge_url);
+    } else if (averageScore > 6 && averageScore <= 9) {
+      badge = "Advanced";
+      badge_url =
+        "https://d8it4huxumps7.cloudfront.net/uploads/images/gamify_badges/login_streak/3.png?d=140x140";
+      user.Badges_Url.push(badge_url);
+    } else {
+      badge = "Expert";
+      badge_url =
+        "https://d8it4huxumps7.cloudfront.net/uploads/images/gamify_badges/login_streak/4.png?d=140x140";
+      user.Badges_Url.push(badge_url);
+    }
+
+    user.Badge = badge;
+    user.Badge_Score = averageScore;
+    await user.save();
+
+    res
+      .status(200)
+      .json({ message: "Answer submitted successfully", score: score });
+  } catch (error) {
+    console.error("Error submitting answer using Groq:", error.message);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+};
 export const submitAnswer = async (req, res) => {
   try {
     const { interview_id, email, question_index, answer, difficulty_level } =
